@@ -52,7 +52,7 @@ gc()
 #' @param type Determines the method used to assign points to each regions. Options
 #' are either "coords" (default), where assignment is based on supplied longitude and latitude data,
 #' or "address", where assignment is based on a supplied address for each point.
-#' @return A tibble containing the original data as well as the data related
+#' @return A tibble/data.frame containing the original data as well as the data related
 #' to the shapefile polygon each point belongs to. The default is to not
 #' return the geometry column (i.e. the polygons are dropped).
 #' @examples
@@ -138,3 +138,156 @@ find_region <- function(data, shp, type = "coords"){
 
   return(data)
 }
+
+
+
+# Get region overlap --------------------------------------------------
+
+#' Create Concordance
+#'
+#' This function is designed to create a spatial concordance between two different
+#' sets of regions (e.g. postcode to federal electorate, or postcode to SA2),
+#' based on the spatial information contained in two supplied shapefiles
+#' (one for each region).
+#'
+#' This is particularly helpful if you are interested in creating a
+#' concordance between regions, or allocating smaller regions to a larger
+#' region (e.g. postcode to SA3) where there is an imperfect relationship and
+#' publicly available concordances are out of date (e.g. ABS spatial concordances
+#' are limited and have not been updated since 2011, even though regions have changed).
+#'
+#'
+#' @param region_from A shapefile containing the polygons of the first region type of interest (e.g. SA2).
+#' This should be a sf object, such as that obtained from using st_read() to load
+#' an ESRI shapefile (.shp). Shapefiles for common ABS geographies can be found at
+#' https://www.abs.gov.au/websitedbs/d3310114.nsf/home/digital+boundaries
+#' @param region_to A shapefile containing the polygons of the second region type of interest (e.g. postcode).
+#' This should be a sf object, such as that obtained from using st_read() to load
+#' an ESRI shapefile (.shp). Shapefiles for common ABS geographies can be found at
+#' https://www.abs.gov.au/websitedbs/d3310114.nsf/home/digital+boundaries
+#' @param id_from An optional parameter which identifies an ID variable for the first
+#' region (e.g. "sa2_main16"). If supplied along with id_to, these variables will be
+#' used to calculate a clean concordance between the two regions. Otherwise,
+#' only the overlap between regions (in sqm) will be returned, which will require
+#' further manipulation to create a concordance.
+#' @param id_to See id_from description, but for the regions contained within region_to
+#' @return If id_from and id_to are both supplied (and correct), the function will return a
+#' tibble with the ID variables and a concordance from region 1 (region_from), to region 2 (region_to).
+#' If no ID variables are supplied, the function will return a tibble with all
+#' variables in region_from and region_to and the overlap between the two regions in sqm.
+#' @examples
+#' # Generate a concordance between Australian Postcodes and SA3 regions
+#' (these shapefiles are available for download from here: https://www.abs.gov.au/websitedbs/d3310114.nsf/home/digital+boundaries)
+#'
+#' sa3_shp <- st_read("SA3_2021_AUST_GDA2020.shp")
+#'
+#' poa_shp <- st_read("POA_2021_AUST_GDA2020.shp")
+#'
+#' poa_to_sa3 <-
+#'   create_concordance(
+#'     region_from = poa_shp,
+#'     region_to = sa3_shp,
+#'     id_from = "POA_CODE21",
+#'     id_to = "SA3_NAME21"
+#'   )
+#'
+#' @export
+
+# get a spatial concordance between two different shapefiles - i.e. the overlap between regions
+create_concordance <- function(region_from, region_to, id_from = NULL, id_to = NULL){
+
+  # check that both are shapefiles
+  if(!("sf" %in% attributes(region_from)$class) | !("sf" %in% attributes(region_to)$class)) {
+
+    stop("Input files must be sf class shapefiles, use st_read() to import two .shp files")
+  }
+
+  region_from %<>% sf::st_transform(32617)
+  region_to %<>% sf::st_transform(32617)
+
+  # buffer shapes to account for invalid geometries
+  region_from %<>% sf::st_buffer(1e-11)
+  region_to %<>% sf::st_buffer(1e-11)
+
+  # remove non-spatial units from the shapefiles
+  region_from %<>% dplyr::mutate(temp_id = dplyr::row_number())
+
+  test_1 <- region_from %>%
+    sf::st_centroid() %>%
+    sf::st_transform(4283) %>%
+    dplyr::mutate(lon = sf::st_coordinates(geometry)[,1]) %>%
+    dplyr::filter(!is.na(lon))
+
+  region_from %<>% dplyr::filter(temp_id %in% test_1$temp_id) %>% dplyr::select(-temp_id)
+
+  region_to %<>% dplyr::mutate(temp_id = dplyr::row_number())
+
+  test_2 <- region_to %>%
+    sf::st_centroid() %>%
+    sf::st_transform(4283) %>%
+    dplyr::mutate(lon = sf::st_coordinates(geometry)[,1]) %>%
+    dplyr::filter(!is.na(lon))
+
+  region_to %<>% dplyr::filter(temp_id %in% test_2$temp_id) %>% dplyr::select(-temp_id)
+
+  # check that the Coordinate Reference Systems (CRS) match - the intersection calculation won't work otherwise
+  if(sf::st_crs(region_from) != sf::st_crs(region_to)) {
+
+    stop("Error converting Coordinate Reference Systems to the same format!")
+  }
+
+  intersection <- dplyr::as_tibble(sf::st_intersection(region_from, region_to))
+
+  intersection$area_crossover_sqm <- sf::st_area(intersection$geometry)
+
+  intersection %<>%
+    dplyr::as_tibble() %>%
+    dplyr::select(-geometry)
+
+  intersection %<>%
+    dplyr::mutate(area_crossover_sqm = area_crossover_sqm %>% as.double()) %>%
+    dplyr::filter(area_crossover_sqm > 1e-5)
+
+  # If IDs have been supplied, then provide a summarised concordance
+  if(!is.null(id_from) & !is.null(id_to)){
+
+    # check that the id columns are valid
+    if(!id_from %in% names(intersection) | !id_from %in% names(region_from) |
+       !id_to %in% names(intersection) | !id_to %in% names(region_to)){
+
+      stop("Invalid IDs! Please ensure that ID_from is a variable in region_from and ID_to is variable in region_to.")
+    }
+
+    conc <- intersection %>%
+      dplyr::group_by(!!dplyr::sym(id_from)) %>%
+      dplyr::mutate(tot_overlap = sum(area_crossover_sqm))
+
+    conc %<>%
+      dplyr::group_by(!!dplyr::sym(id_from), !!dplyr::sym(id_to)) %>%
+      dplyr::summarise(ratio = area_crossover_sqm / tot_overlap)
+
+    conc %<>%
+      dplyr::mutate(ratio = round(ratio, 3)) %>%
+      dplyr::filter(ratio > 0)
+
+  } else {
+
+    conc <- intersection
+  }
+
+  return(conc)
+}
+
+
+# Testing
+sa3_shp <- st_read("SA3_2021_AUST_GDA2020.shp")
+
+poa_shp <- st_read("POA_2021_AUST_GDA2020.shp")
+
+poa_to_sa2 <-
+  create_concordance(
+    region_from = poa_shp,
+    region_to = sa3_shp,
+    id_from = "POA_CODE21",
+    id_to = "SA3_NAME21"
+  )
