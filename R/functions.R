@@ -277,17 +277,3 @@ create_concordance <- function(region_from, region_to, id_from = NULL, id_to = N
 
   return(conc)
 }
-
-
-# Testing
-sa3_shp <- st_read("SA3_2021_AUST_GDA2020.shp")
-
-poa_shp <- st_read("POA_2021_AUST_GDA2020.shp")
-
-poa_to_sa2 <-
-  create_concordance(
-    region_from = poa_shp,
-    region_to = sa3_shp,
-    id_from = "POA_CODE21",
-    id_to = "SA3_NAME21"
-  )
